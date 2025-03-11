@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Space Shooter</title>
+    <style>
+        canvas { display: block; }
+        body { margin: 0; background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // === SETUP ===
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const MIN_WIDTH = 480;
+        const MIN_HEIGHT = 640;
+        let scale = 1;
+
+        function resizeCanvas() {
+            const aspectRatio = MIN_WIDTH / MIN_HEIGHT;
+            let width = window.innerWidth;
+            let height = window.innerHeight;
+            if (width / height > aspectRatio) width = height * aspectRatio;
+            else height = width / aspectRatio;
+            width = Math.max(width, MIN_WIDTH);
+            height = Math.max(height, MIN_HEIGHT);
+            canvas.width = width;
+            canvas.height = height;
+            scale = width / MIN_WIDTH;
+            ctx.scale(scale, scale);
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+        ctx.textAlign = 'left';
+
+        // === GAME STATE ===
+        let level = 1;
+        let score = 0;
+        let gameOver = false;
+        let isPaused = false;
+        let topScores = JSON.parse(localStorage.getItem('topScores')) || [];
+
+        // === PLAYER ===
+        const player = {
+            x: MIN_WIDTH / 2,
+            y: MIN_HEIGHT - 50,
+            width: 40,
+            height: 40,
+            speed: 5,
+            bullets: [],
+            weaponType: 'single',
+            shootCooldown: 0,
+            fireRate: 15
+        };
+
+        // === INPUT ===
+        const keys = { left: false, right: false, up: false, down: false };
+        document.addEventListener('keydown', (e) => {
+            if (gameOver) return;
+            switch(e.key.toLowerCase()) {
+                case 'a': keys.left = true; break;
+                case 'd': keys.right = true; break;
+                case 'w': keys.up = true; break;
+                case 's': keys.down = true; break;
+                case 'escape': if (!gameOver) isPaused = !isPaused; break;
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            switch(e.key.toLowerCase()) {
+                case 'a': keys.left = false; break;
+                case 'd': keys.right = false; break;
+                case 'w': keys.up = false; break;
+                case 's': keys.down = false; break;
+            }
+        });
+        canvas.addEventListener('click', (e) => {
+            if (gameOver) {
+                const rect = canvas.getBoundingClientRect();
+                const x = (e.clientX - rect.left) / scale;
+                const y = (e.clientY - rect.top) / scale;
+                if (x >= MIN_WIDTH/2 - 100 && x <= MIN_WIDTH/2 + 100 &&
+                    y >= MIN_HEIGHT/2 + 40 && y <= MIN_HEIGHT/2 + 90) {
+                    saveScore();
+                    resetGame();
+                }
+            }
+        });
+
+        // === ENEMIES ===
+        let enemies = [];
+        let enemyBullets = []; // New array for enemy projectiles
+        let groupMoving = false;
+        let groupDirection = 1;
+        let groupSpeed = 0.5;
+        let groupDropTimer = 0;
+        const dropInterval = 60;
+        let shootTimer = 0;
+        const baseShootInterval = 180; // Seldom shooting at level 1 (3 seconds at 60 FPS)
+
+        const entryPatterns = {
+            straightDown: (x, i) => ({ x: x + i * 50, y: -40, targetX: x + i * 50, targetY: 100 }),
+            diagonalLeft: (x, i) => ({ x: MIN_WIDTH + i * 50, y: -40, targetX: x + i * 50, targetY: 100 }),
+            diagonalRight: (x, i) => ({ x: -40 - i * 50, y: -40, targetX: x + i * 50, targetY: 100 }),
+            wave: (x, i) => ({ x: x + i * 50, y: -40, targetX: x + i * 50, targetY: 100 + Math.sin(i) * 50 })
+        };
+
+        function spawnEnemyGroup() {
+            enemies = [];
+            groupMoving = false;
+            const types = ['saucer', 'spike', 'drone', 'orbiter'];
+            const healthPoints = { saucer: 1, spike: 2, drone: 3, orbiter: 4 };
+            const patternKeys = Object.keys(entryPatterns);
+            const pattern = patternKeys[Math.floor(Math.random() * patternKeys.length)];
+            const enemyWidth = 40;
+            const spacing = 10;
+            const maxEnemies = Math.floor((MIN_WIDTH - 20) / (enemyWidth + spacing));
+            const enemyCount = Math.min(maxEnemies - 2 + level, maxEnemies);
+            const totalWidth = enemyCount * (enemyWidth + spacing) - spacing;
+            const startX = (MIN_WIDTH - totalWidth) / 2;
+
+            for (let i = 0; i < enemyCount; i++) {
+                const pos = entryPatterns[pattern](startX, i);
+                const type = types[Math.floor(Math.random() * types.length)];
+                enemies.push({
+                    x: pos.x,
+                    y: pos.y,
+                    width: enemyWidth,
+                    height: 40,
+                    speed: groupSpeed,
+                    type,
+                    hp: healthPoints[type],
+                    targetX: pos.targetX,
+                    targetY: pos.targetY,
+                    inPosition: false
+                });
+            }
+        }
+
+        function enemyShoot() {
+            enemies.forEach(enemy => {
+                if (Math.random() < 0.05) { // 5% chance per enemy per shot
+                    enemyBullets.push({
+                        x: enemy.x + enemy.width / 2 - 2,
+                        y: enemy.y + enemy.height,
+                        width: 4,
+                        height: 8,
+                        speed: 3
+                    });
+                }
+            });
+        }
+
+        // === POWER-UPS ===
+        const powerUps = [];
+        function spawnPowerUp(x, y) {
+            const types = ['speed', 'weapon', 'double', 'missile'];
+            powerUps.push({
+                x, y, width: 20, height: 20, speed: 2,
+                type: types[Math.floor(Math.random() * types.length)]
+            });
+        }
+
+        // === BACKGROUND ===
+        const background = {
+            stars: [],
+            init() {
+                for (let i = 0; i < 50; i++) {
+                    this.stars.push({
+                        x: Math.random() * MIN_WIDTH,
+                        y: Math.random() * MIN_HEIGHT,
+                        size: Math.random() * 2 + 1,
+                        speed: Math.random() * 2 + 1
+                    });
+                }
+            },
+            update() {
+                this.stars.forEach(star => {
+                    star.y += star.speed;
+                    if (star.y > MIN_HEIGHT) {
+                        star.y = -star.size;
+                        star.x = Math.random() * MIN_WIDTH;
+                    }
+                });
+            },
+            draw() {
+                ctx.fillStyle = 'white';
+                this.stars.forEach(star => {
+                    ctx.beginPath();
+                    ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            }
+        };
+
+        // === PARTICLES (for missile trail) ===
+        const particles = [];
+        function spawnParticle(x, y, type) {
+            particles.push({
+                x, y,
+                size: type === 'flame' ? 3 : 5,
+                speedX: (Math.random() - 0.5) * 2,
+                speedY: Math.random() * 1 + 1,
+                life: 20,
+                type
+            });
+        }
+
+        function updateParticles() {
+            particles.forEach((p, i) => {
+                p.x += p.speedX;
+                p.y += p.speedY;
+                p.life--;
+                if (p.life <= 0) particles.splice(i, 1);
+            });
+        }
+
+        // === DRAWING FUNCTIONS ===
+        function drawPlayer(x, y, w, h) {
+            ctx.save();
+            ctx.fillStyle = '#666666';
+            ctx.beginPath();
+            ctx.moveTo(x + w/2, y);
+            ctx.lineTo(x + w, y + h * 0.8);
+            ctx.lineTo(x + w * 0.75, y + h);
+            ctx.lineTo(x + w/2, y + h * 0.9);
+            ctx.lineTo(x + w * 0.25, y + h);
+            ctx.lineTo(x, y + h * 0.8);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#00FFFF';
+            ctx.beginPath();
+            ctx.ellipse(x + w/2, y + h * 0.3, w * 0.2, h * 0.15, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#999999';
+            ctx.beginPath();
+            ctx.moveTo(x + w * 0.25, y + h * 0.7);
+            ctx.lineTo(x + w * 0.15, y + h);
+            ctx.lineTo(x + w * 0.35, y + h);
+            ctx.closePath();
+            ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(x + w * 0.75, y + h * 0.7);
+            ctx.lineTo(x + w * 0.65, y + h);
+            ctx.lineTo(x + w * 0.85, y + h);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = 'orange';
+            ctx.beginPath();
+            ctx.moveTo(x + w/2 - 5, y + h);
+            ctx.lineTo(x + w/2 + 5, y + h);
+            ctx.lineTo(x + w/2, y + h + 10);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function drawBullet(x, y, w, h, type) {
+            ctx.save();
+            if (type === 'missile') {
+                ctx.fillStyle = '#FF4444';
+                ctx.beginPath();
+                ctx.moveTo(x + w/2, y);
+                ctx.lineTo(x + w, y + h * 0.7);
+                ctx.lineTo(x + w/2, y + h);
+                ctx.lineTo(x, y + h * 0.7);
+                ctx.closePath();
+                ctx.fill();
+                ctx.fillStyle = '#888888';
+                ctx.beginPath();
+                ctx.moveTo(x + w/2 - 2, y + h);
+                ctx.lineTo(x, y + h * 0.8);
+                ctx.lineTo(x + w/2 - 2, y + h * 0.9);
+                ctx.closePath();
+                ctx.fill();
+                ctx.beginPath();
+                ctx.moveTo(x + w/2 + 2, y + h);
+                ctx.lineTo(x + w, y + h * 0.8);
+                ctx.lineTo(x + w/2 + 2, y + h * 0.9);
+                ctx.closePath();
+                ctx.fill();
+                spawnParticle(x + w/2, y + h, 'flame');
+                spawnParticle(x + w/2, y + h, 'smoke');
+            } else if (type === 'enemy') {
+                ctx.fillStyle = 'red';
+                ctx.beginPath();
+                ctx.arc(x + w/2, y + h/2, w/2, 0, Math.PI * 2);
+                ctx.fill();
+            } else {
+                ctx.fillStyle = 'cyan';
+                ctx.beginPath();
+                ctx.ellipse(x + w/2, y + h/2, w/2, h/2, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+
+        function drawEnemy(x, y, w, h, type) { // Removed hp parameter
+            ctx.save();
+            switch(type) {
+                case 'saucer':
+                    ctx.fillStyle = '#888888';
+                    ctx.beginPath();
+                    ctx.ellipse(x + w/2, y + h/2, w/2, h/4, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#00FF00';
+                    ctx.beginPath();
+                    ctx.ellipse(x + w/2, y + h/3, w/3, h/4, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = 'yellow';
+                    for (let i = 0; i < 3; i++) {
+                        ctx.beginPath();
+                        ctx.arc(x + w/4 + (i * w/4), y + h/2, 3, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                    break;
+                case 'spike':
+                    ctx.fillStyle = '#FF4444';
+                    ctx.beginPath();
+                    ctx.moveTo(x + w/2, y);
+                    ctx.lineTo(x + w, y + h * 0.8);
+                    ctx.lineTo(x + w * 0.8, y + h);
+                    ctx.lineTo(x + w/2, y + h * 0.7);
+                    ctx.lineTo(x + w * 0.2, y + h);
+                    ctx.lineTo(x, y + h * 0.8);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.fillStyle = 'black';
+                    ctx.beginPath();
+                    ctx.arc(x + w/2, y + h/3, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                    break;
+                case 'drone':
+                    ctx.fillStyle = '#5555AA';
+                    ctx.fillRect(x + w/4, y, w/2, h * 0.7);
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(x + w/3, y);
+                    ctx.lineTo(x + w/3, y - 10);
+                    ctx.moveTo(x + w * 2/3, y);
+                    ctx.lineTo(x + w * 2/3, y - 10);
+                    ctx.stroke();
+                    ctx.fillStyle = '#FF8800';
+                    ctx.fillRect(x + w/3, y + h * 0.7, w/3, h * 0.2);
+                    break;
+                case 'orbiter':
+                    ctx.fillStyle = '#AA00AA';
+                    ctx.beginPath();
+                    ctx.arc(x + w/2, y + h/2, w/2, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.ellipse(x + w/2, y + h/2, w * 0.7, h * 0.2, Math.PI/4, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.ellipse(x + w/2, y + h/2, w * 0.7, h * 0.2, -Math.PI/4, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.fillStyle = 'red';
+                    ctx.beginPath();
+                    ctx.arc(x + w/2, y + h/2, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                    break;
+            }
+            ctx.restore();
+        }
+
+        function drawPowerUp(x, y, w, h, type) {
+            ctx.save();
+            switch(type) {
+                case 'speed':
+                    // Arrow pointing up
+                    ctx.fillStyle = 'yellow';
+                    ctx.beginPath();
+                    ctx.moveTo(x + w/2, y);
+                    ctx.lineTo(x + w, y + h/2);
+                    ctx.lineTo(x + w * 0.75, y + h/2);
+                    ctx.lineTo(x + w * 0.75, y + h);
+                    ctx.lineTo(x + w * 0.25, y + h);
+                    ctx.lineTo(x + w * 0.25, y + h/2);
+                    ctx.lineTo(x, y + h/2);
+                    ctx.closePath();
+                    ctx.fill();
+                    break;
+                case 'weapon': // Spread
+                    // Three diverging lines
+                    ctx.fillStyle = 'purple';
+                    ctx.beginPath();
+                    ctx.moveTo(x + w/2, y + h);
+                    ctx.lineTo(x + w/2, y + h * 0.2);
+                    ctx.lineTo(x, y);
+                    ctx.lineTo(x + w/4, y + h * 0.4);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.moveTo(x + w/2, y + h);
+                    ctx.lineTo(x + w/2, y + h * 0.2);
+                    ctx.lineTo(x + w, y);
+                    ctx.lineTo(x + 3*w/4, y + h * 0.4);
+                    ctx.closePath();
+                    ctx.fill();
+                    break;
+                case 'double':
+                    // Two parallel bars
+                    ctx.fillStyle = 'blue';
+                    ctx.fillRect(x + w/4 - 2, y, 4, h);
+                    ctx.fillRect(x + 3*w/4 - 2, y, 4, h);
+                    break;
+                case 'missile':
+                    // Missile shape
+                    ctx.fillStyle = 'red';
+                    ctx.beginPath();
+                    ctx.moveTo(x + w/2, y);
+                    ctx.lineTo(x + w, y + h * 0.7);
+                    ctx.lineTo(x + w/2, y + h);
+                    ctx.lineTo(x, y + h * 0.7);
+                    ctx.closePath();
+                    ctx.fill();
+                    break;
+            }
+            ctx.restore();
+        }
+
+        function drawParticles() {
+            particles.forEach(p => {
+                ctx.fillStyle = p.type === 'flame' ? 'orange' : 'gray';
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        // === GAME LOGIC ===
+        function shootBullet() {
+            const damage = { single: 1, double: 1, spread: 1, missile: 3 };
+            switch(player.weaponType) {
+                case 'single':
+                    player.bullets.push({ x: player.x + player.width/2 - 2, y: player.y, width: 4, height: 10, speed: 8, damage: damage.single });
+                    break;
+                case 'double':
+                    player.bullets.push({ x: player.x + player.width/4 - 2, y: player.y, width: 4, height: 10, speed: 8, damage: damage.double });
+                    player.bullets.push({ x: player.x + 3 * player.width/4 - 2, y: player.y, width: 4, height: 10, speed: 8, damage: damage.double });
+                    break;
+                case 'spread':
+                    for (let angle = -0.2; angle <= 0.2; angle += 0.1) {
+                        player.bullets.push({ x: player.x + player.width/2 - 2, y: player.y, width: 4, height: 10, speed: 8, angle, damage: damage.spread });
+                    }
+                    break;
+                case 'missile':
+                    player.bullets.push({ x: player.x + player.width/2 - 5, y: player.y, width: 10, height: 20, speed: 6, type: 'missile', damage: damage.missile });
+                    break;
+            }
+        }
+
+        function updateEnemies() {
+            if (enemies.length === 0) {
+                level++;
+                groupSpeed += 0.2;
+                spawnEnemyGroup();
+                return;
+            }
+
+            let allInPosition = true;
+            enemies.forEach(enemy => {
+                if (!enemy.inPosition) {
+                    const dx = enemy.targetX - enemy.x;
+                    const dy = enemy.targetY - enemy.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    if (distance > 5) {
+                        enemy.x += (dx / distance) * enemy.speed;
+                        enemy.y += (dy / distance) * enemy.speed;
+                        allInPosition = false;
+                    } else {
+                        enemy.inPosition = true;
+                    }
+                }
+            });
+
+            if (allInPosition && !groupMoving) groupMoving = true;
+
+            if (groupMoving) {
+                const leftMost = Math.min(...enemies.map(e => e.x));
+                const rightMost = Math.max(...enemies.map(e => e.x + e.width));
+                if (rightMost >= MIN_WIDTH - 10) groupDirection = -1;
+                if (leftMost <= 10) groupDirection = 1;
+
+                enemies.forEach(enemy => enemy.x += groupSpeed * groupDirection);
+
+                groupDropTimer++;
+                if (groupDropTimer >= dropInterval) {
+                    enemies.forEach(enemy => {
+                        enemy.y += 20;
+                        enemy.targetY += 20;
+                    });
+                    groupDropTimer = 0;
+                }
+            }
+
+            // Enemy shooting
+            shootTimer++;
+            const shootInterval = baseShootInterval - (level - 1) * 20; // Decrease interval by 20 frames per level
+            if (shootTimer >= shootInterval) {
+                enemyShoot();
+                shootTimer = 0;
+            }
+
+            enemies.forEach((enemy, i) => {
+                player.bullets.forEach((bullet, j) => {
+                    if (bullet.x < enemy.x + enemy.width &&
+                        bullet.x + bullet.width > enemy.x &&
+                        bullet.y < enemy.y + enemy.height &&
+                        bullet.y + bullet.height > enemy.y) {
+                        enemy.hp -= bullet.damage || 1;
+                        player.bullets.splice(j, 1);
+                        if (enemy.hp <= 0) {
+                            enemies.splice(i, 1);
+                            score += 10;
+                            if (Math.random() < 0.2) spawnPowerUp(enemy.x, enemy.y);
+                        }
+                    }
+                });
+
+                if (enemy.y > MIN_HEIGHT || 
+                    (enemy.x < player.x + player.width &&
+                     enemy.x + enemy.width > player.x &&
+                     enemy.y < player.y + player.height &&
+                     enemy.y + enemy.height > player.y)) {
+                    gameOver = true;
+                }
+            });
+
+            // Update enemy bullets
+            enemyBullets.forEach((bullet, i) => {
+                bullet.y += bullet.speed;
+                if (bullet.y > MIN_HEIGHT) enemyBullets.splice(i, 1);
+                if (bullet.x < player.x + player.width &&
+                    bullet.x + bullet.width > player.x &&
+                    bullet.y < player.y + player.height &&
+                    bullet.y + bullet.height > player.y) {
+                    gameOver = true;
+                }
+            });
+        }
+
+        function update() {
+            if (isPaused || gameOver) return;
+
+            if (keys.left && player.x > 0) player.x -= player.speed;
+            if (keys.right && player.x < MIN_WIDTH - player.width) player.x += player.speed;
+            if (keys.up && player.y > MIN_HEIGHT / 2) player.y -= player.speed;
+            if (keys.down && player.y < MIN_HEIGHT - player.height) player.y += player.speed;
+
+            if (player.shootCooldown <= 0) {
+                shootBullet();
+                player.shootCooldown = player.fireRate;
+            }
+            if (player.shootCooldown > 0) player.shootCooldown--;
+
+            player.bullets.forEach((bullet, i) => {
+                bullet.y -= bullet.speed;
+                if (bullet.angle) bullet.x += Math.sin(bullet.angle) * bullet.speed;
+                if (bullet.y < 0) player.bullets.splice(i, 1);
+            });
+
+            updateEnemies();
+
+            powerUps.forEach((powerUp, i) => {
+                powerUp.y += powerUp.speed;
+                if (powerUp.x < player.x + player.width &&
+                    powerUp.x + powerUp.width > player.x &&
+                    powerUp.y < player.y + player.height &&
+                    powerUp.y + powerUp.height > player.y) {
+                    if (powerUp.type === 'speed') player.speed = 7;
+                    else if (powerUp.type === 'weapon') player.weaponType = 'spread';
+                    else if (powerUp.type === 'double') player.weaponType = 'double';
+                    else if (powerUp.type === 'missile') player.weaponType = 'missile';
+                    powerUps.splice(i, 1);
+                }
+                if (powerUp.y > MIN_HEIGHT) powerUps.splice(i, 1);
+            });
+
+            background.update();
+            updateParticles();
+        }
+
+        // === TOP SCORER SYSTEM ===
+        function saveScore() {
+            if (score > 0) {
+                const name = prompt('Game Over! Enter your name for the high score list:', 'Player');
+                if (name) {
+                    topScores.push({ name, score });
+                    topScores.sort((a, b) => b.score - a.score);
+                    topScores = topScores.slice(0, 5); // Keep top 5
+                    localStorage.setItem('topScores', JSON.stringify(topScores));
+                }
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, MIN_WIDTH, MIN_HEIGHT);
+            background.draw();
+            drawPlayer(player.x, player.y, player.width, player.height);
+            player.bullets.forEach(b => drawBullet(b.x, b.y, b.width, b.height, b.type));
+            enemies.forEach(e => drawEnemy(e.x, e.y, e.width, e.height, e.type));
+            powerUps.forEach(p => drawPowerUp(p.x, p.y, p.width, p.height, p.type));
+            enemyBullets.forEach(b => drawBullet(b.x, b.y, b.width, b.height, 'enemy'));
+            drawParticles();
+
+            ctx.fillStyle = 'white';
+            ctx.font = '20px Arial';
+            ctx.fillText('Score: ' + score, 10, 30);
+            ctx.fillText('Level: ' + level, 10, 50);
+
+            if (isPaused && !gameOver) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, MIN_WIDTH, MIN_HEIGHT);
+                ctx.fillStyle = 'white';
+                ctx.font = '40px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Paused', MIN_WIDTH/2, MIN_HEIGHT/2);
+                ctx.textAlign = 'left';
+            }
+
+            if (gameOver) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, MIN_WIDTH, MIN_HEIGHT);
+                ctx.fillStyle = 'white';
+                ctx.font = '40px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Game Over', MIN_WIDTH/2, MIN_HEIGHT/2 - 100);
+                ctx.font = '30px Arial';
+                ctx.fillText('Score: ' + score, MIN_WIDTH/2, MIN_HEIGHT/2 - 60);
+                ctx.fillStyle = 'green';
+                ctx.fillRect(MIN_WIDTH/2 - 100, MIN_HEIGHT/2 + 40, 200, 50);
+                ctx.fillStyle = 'white';
+                ctx.font = '20px Arial';
+                ctx.fillText('Play Again?', MIN_WIDTH/2, MIN_HEIGHT/2 + 75);
+
+                // Draw top scores
+                ctx.font = '20px Arial';
+                ctx.fillText('Top Scores:', MIN_WIDTH/2, MIN_HEIGHT/2 - 20);
+                topScores.forEach((entry, i) => {
+                    ctx.fillText(`${i + 1}. ${entry.name}: ${entry.score}`, MIN_WIDTH/2, MIN_HEIGHT/2 + 10 + i * 20);
+                });
+                ctx.textAlign = 'left';
+            }
+        }
+
+        function resetGame() {
+            player.x = MIN_WIDTH / 2;
+            player.y = MIN_HEIGHT - 50;
+            player.bullets = [];
+            player.speed = 5;
+            player.weaponType = 'single';
+            enemies = [];
+            enemyBullets = [];
+            powerUps.length = 0;
+            particles.length = 0;
+            score = 0;
+            level = 1;
+            groupSpeed = 0.5;
+            gameOver = false;
+            isPaused = false;
+            shootTimer = 0;
+            spawnEnemyGroup();
+        }
+
+        // === GAME LOOP ===
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // === INITIALIZATION ===
+        background.init();
+        spawnEnemyGroup();
+        gameLoop();
+    </script>
+</body>
+</html>
