@@ -65,15 +65,21 @@ Love the game and want to help improve it? Contributions are welcome!
 1. Fork this repository.
 2. Create a branch:
 
-```git checkout -b feature/your-idea
+```
+git checkout -b feature/your-idea
+```
 
 3. Commit your changes:
 
-```git commit -m "Add your feature"
+```
+git commit -m "Add your feature"
+```
 
 4. Push to your branch:
 
-```git push origin feature/your-idea
+```
+git push origin feature/your-idea
+```
 
 5. Open a Pull Request:
 
