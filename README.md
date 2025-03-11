@@ -22,10 +22,6 @@ Welcome to **Space Shooter**, a thrilling vertical scrolling space shooter game 
 3. Shoot down enemies and grab power-ups to survive longer.
 4. When the game ends, enter your name to save your score and try to beat the top 10!
 
-## Screenshots
-
-*(Add screenshots here if you have them! To add: capture images, upload to the repo, and link like `![Gameplay](screenshot.png)`.)*
-
 ## Hosting
 
 Space Shooter is hosted on **GitHub Pages**, a free static hosting service. The game runs entirely in your browser with no external dependencies.
